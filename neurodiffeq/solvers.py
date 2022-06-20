@@ -1858,12 +1858,22 @@ class UniversalSolver1D(ABC, UniversalPretrainedSolver):
                 return [self.solvers_base[i].get_solution() for i in range(len(self.solvers_base))]
             else:
                 return [self.solvers_head[i].get_solution() for i in range(len(self.solvers_head))]
-        
     
-    def get_ana_output(self, s, timesteps, u0):
-       
-        t_size = timesteps
-        d = 10
+    
+    def freeze_bases(self):
+        if type(self.bases) == list:
+            for base in self.bases:
+                for param in base.parameters():
+                    param.requires_grad = False
+        else:
+            for param in self.bases.parameters():
+                param.requires_grad = False
+        
+    def get_ana_output(self, s, timesteps, u0, tmin, tmax, system_params):
+        
+        self.freeze_bases()
+        d = self.solvers_base[0].head[0].last_layer.in_features
+        n = len(u0)
 
         activations = {}
         def get_activation(name):
@@ -1873,16 +1883,15 @@ class UniversalSolver1D(ABC, UniversalPretrainedSolver):
 
         handle = self.solvers_base[s].bases.linear_3.register_forward_hook(get_activation('common_layers'))
 
-        t = torch.linspace(0, 1, t_size).reshape(-1, 1)
+        t = torch.linspace(tmin, tmax, timesteps).reshape(-1, 1)
         t = torch.autograd.Variable(t, requires_grad=True)
 
-        DH = np.zeros((t_size, d))
-        y = self.solvers_base[s].bases(t)
-        # n = y.size()[1]
-        n = len(u0)
+        DH = np.zeros((timesteps, d))
+        _ = self.solvers_base[s].bases(t)
+        
 
         for i in range(d):
-            DH[:, i] = diff(activations['common_layers'][:, i].reshape(-1, 1), t).detach().cpu().numpy().reshape(t_size,)
+            DH[:, i] = diff(activations['common_layers'][:, i].reshape(-1, 1), t).detach().cpu().numpy().reshape(timesteps,)
         
         H = activations['common_layers'].detach().cpu().numpy()
         H = np.hstack((H, np.ones((timesteps, 1))))
@@ -1901,7 +1910,8 @@ class UniversalSolver1D(ABC, UniversalPretrainedSolver):
                             Qdot[z, i, j, k] = DH[z, k]
         
         A = np.zeros((n, n))
-        A[0, 0] = -1
+        # TODO: Generalize this
+        A[0, 0] = system_params['l']
                         
         X = np.zeros((len(t), d, n, n))
         Xd = np.zeros((len(t), d, n, n))
@@ -1936,7 +1946,6 @@ class UniversalSolver1D(ABC, UniversalPretrainedSolver):
 
         w = np.linalg.pinv(G)@z
         W = np.tensordot(w[:, 0], v, axes=1)
-    #     return W, H, X, M, Z, z, G, v, t.detach().cpu().numpy()
         return W, H, t.detach().cpu().numpy()
 
     def final_solver(self, s, timesteps, u0, ls):
